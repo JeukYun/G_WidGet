@@ -1,0 +1,24 @@
+# 개인 설정 (위치, 테마 등)
+config.json
+
+# 바로가기 (로컬 경로 포함)
+*.lnk
+
+# 로그
+error.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+widget.ico
+build/
+dist/
+*.spec
