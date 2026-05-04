@@ -1513,6 +1513,7 @@ class MainWidget(QWidget):
         self._desktop_active: bool = False  # Show Desktop 상태 추적
         self._stock_rows: list = []
         self._show_border: bool = False
+        self._last_weather = None
 
         self._init_window()
         self._build_ui()
@@ -1844,10 +1845,13 @@ class MainWidget(QWidget):
 
     def _on_weather(self, result):
         if isinstance(result, Exception):
-            self.weather_section.set_error(str(result))
-        else:
-            self.weather_section.update_data(result, self.cfg.get("unit", "C"))
-            self.hourly_strip.update_data(result.hourly)
+            _log(f"날씨 갱신 실패: {result}")
+            if self._last_weather is None:
+                self.weather_section.set_error("날씨 정보를 불러올 수 없어요")
+            return
+        self._last_weather = result
+        self.weather_section.update_data(result, self.cfg.get("unit", "C"))
+        self.hourly_strip.update_data(result.hourly)
         # fetch 직후 응답 객체·임시 버퍼 정리
         QTimer.singleShot(500, _trim_memory)
 

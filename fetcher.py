@@ -228,6 +228,17 @@ def fetch_weather(city: str) -> WeatherData:
         arr = daily.get(key, [])
         return arr[0] if arr else default
 
+    # 강수확률: 이미 지난 시간을 포함한 daily max 는 오해의 소지가 큼.
+    # 오늘 남은 시간(자정까지)의 hourly 값 중 최댓값을 사용.
+    today_str = now.date().isoformat()
+    remaining_probs = [
+        int(rains[i]) for i, t_str in enumerate(times)
+        if i < len(rains) and rains[i] is not None
+        and t_str.startswith(today_str)
+        and t_str >= now.strftime("%Y-%m-%dT%H:00")
+    ]
+    rain_pct_today = max(remaining_probs) if remaining_probs else 0
+
     return WeatherData(
         city=display,
         temp_c=float(cur["temperature_2m"]),
@@ -238,7 +249,7 @@ def fetch_weather(city: str) -> WeatherData:
         wind_kmh=float(cur.get("wind_speed_10m", 0)),
         temp_max_c=float(_today("temperature_2m_max", cur["temperature_2m"])),
         temp_min_c=float(_today("temperature_2m_min", cur["temperature_2m"])),
-        rain_pct=int(_today("precipitation_probability_max", 0) or 0),
+        rain_pct=rain_pct_today,
         desc=desc,
         hourly=slots,
     )
