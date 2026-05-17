@@ -1011,6 +1011,93 @@ def _resolve_lnk_target(lnk_path: str) -> Optional[str]:
     return None
 
 
+def _resolve_url_iconfile(url_path: str) -> Optional[str]:
+    """.url 인터넷 바로가기에서 IconFile= 경로 추출."""
+    try:
+        for enc in ("utf-8", "cp949", "mbcs"):
+            try:
+                text = Path(url_path).read_text(encoding=enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            return None
+        for line in text.splitlines():
+            if line.lower().startswith("iconfile="):
+                p = line.split("=", 1)[1].strip()
+                if p and Path(p).exists():
+                    return p
+    except Exception as ex:
+        _log(f"url IconFile 추출 실패 {url_path}: {ex}")
+    return None
+
+
+def _icon_via_image_factory(path: str, size: int) -> Optional[QPixmap]:
+    """IShellItemImageFactory.GetImage — UWP / AppsFolder / 일반 파일 전부 동작.
+    .lnk 가 UWP AUMID 를 가리키는 경우에도 패키지 manifest 의 큰 아이콘을 추출."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes, byref, POINTER, c_void_p
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", ctypes.c_ulong),
+                        ("Data2", ctypes.c_ushort),
+                        ("Data3", ctypes.c_ushort),
+                        ("Data4", ctypes.c_ubyte * 8)]
+
+        class SIZE(ctypes.Structure):
+            _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+        iid = GUID()
+        ctypes.windll.ole32.CLSIDFromString(
+            "{bcc18b79-ba16-442f-80c4-8a59c30c463b}", byref(iid))
+
+        SHCreateItemFromParsingName = ctypes.windll.shell32.SHCreateItemFromParsingName
+        SHCreateItemFromParsingName.argtypes = [
+            wintypes.LPCWSTR, c_void_p, POINTER(GUID), POINTER(c_void_p)]
+        SHCreateItemFromParsingName.restype = ctypes.c_long
+
+        psi = c_void_p()
+        hr = SHCreateItemFromParsingName(path, None, byref(iid), byref(psi))
+        if hr != 0 or not psi.value:
+            return None
+
+        try:
+            # vtable[3] = GetImage(SIZE, SIIGBF, HBITMAP*)
+            vtbl = ctypes.cast(
+                ctypes.cast(psi, POINTER(c_void_p))[0],
+                POINTER(c_void_p * 4),
+            )[0]
+            GetImageProto = ctypes.WINFUNCTYPE(
+                ctypes.c_long, c_void_p, SIZE, ctypes.c_int,
+                POINTER(wintypes.HBITMAP))
+            get_image = GetImageProto(vtbl[3])
+            hbm = wintypes.HBITMAP()
+            SIIGBF_BIGGERSIZEOK = 0x01
+            hr = get_image(psi, SIZE(size, size), SIIGBF_BIGGERSIZEOK, byref(hbm))
+            if hr != 0 or not hbm:
+                return None
+            from PyQt5.QtWinExtras import QtWin
+            pix = QtWin.fromHBITMAP(int(hbm.value), QtWin.HBitmapAlpha)
+            ctypes.windll.gdi32.DeleteObject(hbm)
+            if pix is None or pix.isNull():
+                return None
+            return pix.scaled(size, size, Qt.KeepAspectRatio,
+                              Qt.SmoothTransformation)
+        finally:
+            ReleaseProto = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)
+            release_vtbl = ctypes.cast(
+                ctypes.cast(psi, POINTER(c_void_p))[0],
+                POINTER(c_void_p * 3),
+            )[0]
+            ReleaseProto(release_vtbl[2])(psi)
+    except Exception as ex:
+        _log(f"image factory 실패 {path}: {ex}")
+        return None
+
+
 def _icon_via_shell(path: str, size: int) -> Optional[QPixmap]:
     """SHGetFileInfo 로 아이콘 추출. SHGFI_LINKOVERLAY 미지정 → 화살표 없음."""
     if sys.platform != "win32":
@@ -1051,21 +1138,32 @@ def _icon_via_shell(path: str, size: int) -> Optional[QPixmap]:
 
 
 def _icon_for_path(path: str, size: int) -> QPixmap:
-    """경로에 대한 아이콘 픽스맵. SHGetFileInfo(점보) 우선 사용."""
-    # 1. 시스템 점보 아이콘 (256x256, 오버레이 없음)
+    """경로에 대한 아이콘 픽스맵. .lnk/.url 은 타겟 먼저 시도."""
+    low = path.lower()
+
+    # 1. .lnk / .url 은 타겟을 먼저 — 컨테이너 자체 아이콘은 빈 문서로 떨어지는 경우 많음
+    resolved = None
+    if low.endswith(".lnk"):
+        resolved = _resolve_lnk_target(path)
+    elif low.endswith(".url"):
+        resolved = _resolve_url_iconfile(path)
+
+    if resolved:
+        pix = _icon_via_image_factory(resolved, size)
+        if pix is not None and not pix.isNull():
+            return pix
+        pix = _icon_via_shell(resolved, size)
+        if pix is not None and not pix.isNull():
+            return pix
+
+    # 2. 원본 경로 그대로
+    pix = _icon_via_image_factory(path, size)
+    if pix is not None and not pix.isNull():
+        return pix
     pix = _icon_via_shell(path, size)
     if pix is not None and not pix.isNull():
         return pix
-
-    # 2. .lnk 면 타겟 resolve 해서 다시 시도
-    actual = path
-    if path.lower().endswith(".lnk"):
-        target = _resolve_lnk_target(path)
-        if target:
-            actual = target
-            pix = _icon_via_shell(actual, size)
-            if pix is not None and not pix.isNull():
-                return pix
+    actual = resolved or path
 
     # 3. QFileIconProvider fallback
     from PyQt5.QtCore    import QFileInfo
